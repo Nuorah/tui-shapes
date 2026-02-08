@@ -1,0 +1,301 @@
+const std = @import("std");
+const editor = @import("editor");
+const ArrayList = @import("collections").ArrayList;
+
+const View = enum {
+    quit,
+    pit,
+    shape,
+    task,
+};
+
+const EditorContext = struct {
+    file_path: []const u8,
+    term_size: TerminalSize,
+};
+
+const TerminalSize = struct {
+    cols: u16,
+    rows: u16,
+};
+
+fn getTerminalSize(fd: std.posix.fd_t) TerminalSize {
+    var wsz: std.posix.winsize = undefined;
+    const rc = std.posix.system.ioctl(fd, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
+    if (rc == 0) {
+        return .{
+            .cols = wsz.col,
+            .rows = wsz.row,
+        };
+    }
+    // fallback
+    return .{ .cols = 80, .rows = 24 };
+}
+
+// =====
+// Input
+// =====
+
+const Key = union(enum) {
+    char: u21,
+    ctrl: u8,
+    arrow_up,
+    arrow_down,
+    arrow_left,
+    arrow_right,
+    escape,
+    enter,
+    backspace,
+    delete,
+    home,
+    end,
+    page_up,
+    page_down,
+    tab,
+    none,
+};
+
+fn readKey(reader: anytype) !Key {
+    var buf: [1]u8 = undefined;
+    reader.readSliceAll(&buf) catch |err| {
+        if (err == error.EndOfStream) return .none;
+        return err;
+    };
+
+    const c = buf[0];
+
+    if (c == '\x1b') {
+        const seq0 = reader.takeByte() catch return .escape;
+        if (seq0 == '[') {
+            const seq1 = reader.takeByte() catch return .escape;
+            return switch (seq1) {
+                'A' => .arrow_up,
+                'B' => .arrow_down,
+                'C' => .arrow_right,
+                'D' => .arrow_left,
+                'H' => .home,
+                'F' => .end,
+                '1'...'9' => blk: {
+                    const seq2 = reader.takeByte() catch break :blk .escape;
+                    if (seq2 == '~') {
+                        break :blk switch (seq1) {
+                            '1' => .home,
+                            '3' => .delete,
+                            '4' => .end,
+                            '5' => .page_up,
+                            '6' => .page_down,
+                            '7' => .home,
+                            '8' => .end,
+                            else => .escape,
+                        };
+                    }
+                    break :blk .escape;
+                },
+                else => .escape,
+            };
+        } else if (seq0 == 'O') {
+            const seq1 = reader.takeByte() catch return .escape;
+            return switch (seq1) {
+                'H' => .home,
+                'F' => .end,
+                else => .escape,
+            };
+        }
+        return .escape;
+    }
+
+    if (c == '\r') return .enter;
+    if (c == '\t') return .tab;
+    if (c == 127) return .backspace;
+    if (c < 32) return .{ .ctrl = c + 'a' - 1 };
+    // at the end of readKey, instead of just returning .{ .char = c }
+    if (c < 0x80) {
+        return .{ .char = c };
+    } else if (c & 0xE0 == 0xC0) {
+        // 2-byte sequence
+        const c2 = reader.takeByte() catch return .none;
+        const codepoint = (@as(u21, c & 0x1F) << 6) | (c2 & 0x3F);
+        return .{ .char = codepoint };
+    } else if (c & 0xF0 == 0xE0) {
+        // 3-byte sequence
+        const c2 = reader.takeByte() catch return .none;
+        const c3 = reader.takeByte() catch return .none;
+        const codepoint = (@as(u21, c & 0x0F) << 12) | (@as(u21, c2 & 0x3F) << 6) | (c3 & 0x3F);
+        return .{ .char = codepoint };
+    } else if (c & 0xF8 == 0xF0) {
+        // 4-byte sequence
+        const c2 = reader.takeByte() catch return .none;
+        const c3 = reader.takeByte() catch return .none;
+        const c4 = reader.takeByte() catch return .none;
+        const codepoint = (@as(u21, c & 0x07) << 18) | (@as(u21, c2 & 0x3F) << 12) | (@as(u21, c3 & 0x3F) << 6) | (c4 & 0x3F);
+        return .{ .char = codepoint };
+    }
+    return .none; // invalid utf-8 lead byte
+}
+
+// =====
+// Action
+// =====
+const Action = union(enum) {
+    move_up,
+    move_down,
+    move_left,
+    move_right,
+    select,
+    quit,
+    none,
+};
+
+// =====
+// Update
+// =====
+
+fn update(
+    action: Action,
+    state: *View,
+) void {
+    switch (action) {
+        .move_up => {},
+        .move_down => {},
+        .move_left => {},
+        .move_right => {},
+        .select => {},
+        .quit => {
+            state.* = .quit;
+        },
+        .none => {},
+    }
+}
+
+// =====
+// Render
+// =====
+
+const TextElement = struct {
+    x_pct: u8,
+    y_pct: u8,
+    text: []const u8,
+    color: ?u8 = null,
+    bold: bool = false,
+};
+
+fn render(
+    writer: *std.Io.Writer,
+    elements: ArrayList(TextElement),
+    term_size:TerminalSize,
+) !void {
+    try writer.writeAll("\x1b[H");
+
+    try writer.writeAll("\x1b[K\r\n");
+
+    try writer.writeAll("\x1b[K");
+
+    try writer.print("\x1b[{d};{d}H{s}", .{ 5, 10, "Hello" });
+
+    try writer.flush();
+}
+
+fn keyToAction(key: Key, view: View) Action {
+    return switch (view) {
+        .pit => switch (key) {
+            .char => |c| switch (c) {
+                'q' => .quit,
+                else => .none,
+            },
+            .ctrl => |c| switch (c) {
+                else => .none,
+            },
+            .arrow_up => .move_up,
+            .arrow_down => .move_down,
+            .arrow_left => .move_left,
+            .arrow_right => .move_right,
+            .none => .none,
+            else => .none,
+        },
+        .shape => switch (key) {
+            .arrow_up => .move_up,
+            .arrow_down => .move_down,
+            .arrow_left => .move_left,
+            .arrow_right => .move_right,
+            .none => .none,
+            else => .none,
+        },
+        .task => switch (key) {
+            .none => .none,
+            else => .none,
+        },
+        .quit => .none,
+    };
+}
+
+pub fn main() u8 {
+    var stdout = std.fs.File.stdout();
+    var stdout_writer_buffer: [128]u8 = undefined;
+    var stdout_writer = stdout.writer(&stdout_writer_buffer);
+
+    var stderr = std.fs.File.stderr();
+    var stderr_writer_buffer: [128]u8 = undefined;
+    var stderr_writer = stderr.writer(&stderr_writer_buffer);
+
+    run(&stdout_writer.interface, &stderr_writer.interface) catch |err| {
+        switch (err) {
+            error.InvalidCommand => return 2,
+            else => {
+                stderr_writer.interface.print("Error: {}", .{err}) catch return 1;
+                stderr_writer.interface.flush() catch return 1;
+                return 1;
+            },
+        }
+    };
+    return 0;
+}
+
+pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
+    const allocator = std.heap.c_allocator;
+
+    const stdin = std.fs.File.stdin();
+    var stdin_reader_buffer: [128]u8 = undefined;
+    var stdin_reader = stdin.reader(&stdin_reader_buffer);
+
+    const args = try std.process.argsAlloc(allocator);
+    _ = if (args.len > 1) args[1] else {
+        try stderr_writer.writeAll("Usage: editor <file>");
+        try stderr_writer.flush();
+        return error.InvalidCommand;
+    };
+
+    const original = try std.posix.tcgetattr(stdin.handle);
+    defer std.posix.tcsetattr(stdin.handle, .FLUSH, original) catch {};
+
+    var raw = original;
+    raw.iflag.BRKINT = false;
+    raw.iflag.INPCK = false;
+    raw.iflag.ISTRIP = false;
+    raw.iflag.IXON = false;
+    raw.iflag.ICRNL = false;
+    raw.oflag.OPOST = false;
+    raw.cflag.CSIZE = .CS8;
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+    raw.lflag.ISIG = false;
+    raw.lflag.IEXTEN = false;
+    raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
+    raw.cc[@intFromEnum(std.posix.V.TIME)] = 1;
+    try std.posix.tcsetattr(stdin.handle, .FLUSH, raw);
+
+    var state: View = .pit;
+
+    try stdout_writer.writeAll("\x1b[?1049h");
+    try stdout_writer.writeAll("\x1b[?25l");
+
+    defer stdout_writer.flush() catch {};
+    defer stdout_writer.writeAll("\x1b[?25h") catch {};
+    defer stdout_writer.writeAll("\x1b[?1049l") catch {};
+
+    while (state != .quit) {
+        try render(stdout_writer);
+        const key = try readKey(&stdin_reader.interface);
+        const action = keyToAction(key, state);
+        update(action, &state);
+    }
+}

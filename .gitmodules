@@ -1,0 +1,6 @@
+[submodule "vendor/event_wal"]
+	path = vendor/event_wal
+	url = git@github.com:Nuorah/event_wal.git
+[submodule "vendor/collections"]
+	path = vendor/collections
+	url = https://github.com/Nuorah/collections.git

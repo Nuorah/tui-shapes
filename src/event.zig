@@ -1,11 +1,11 @@
 const model = @import("model.zig");
 
-pub const ShapeCreated = struct {
+pub const ProjectCreated = struct {
     id: u64,
     name: []const u8,
 };
 
-pub const EventData = union(enum) { shape_created: ShapeCreated };
+pub const EventData = union(enum) { project_created: ProjectCreated };
 
 pub const Event = struct {
     timestamp: i64,

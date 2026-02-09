@@ -34,11 +34,11 @@ pub const Database = struct {
     pub fn loadEvent(
         allocator: std.mem.Allocator,
         event_to_load: event.Event,
-        shape_storage: *Storage(model.Shape),
+        shape_storage: *Storage(model.Project),
     ) !void {
         switch (event_to_load.data) {
-            .shape_created => |payload| {
-                const shape = model.Shape{
+            .project_created => |payload| {
+                const shape = model.Project{
                     .id = payload.id,
                     .name = try allocator.dupe(u8, payload.name),
                 };
@@ -52,7 +52,7 @@ pub const Database = struct {
         self: *Self,
         allocator: std.mem.Allocator,
         arena_allocator: std.mem.Allocator,
-        shape_storage: *Storage(model.Shape),
+        shape_storage: *Storage(model.Project),
     ) !void {
         const events = try self.wal.readAll(arena_allocator);
 
@@ -66,7 +66,7 @@ pub const Database = struct {
         main_allocator: std.mem.Allocator,
         arena_allocator: std.mem.Allocator,
         event_to_append: event.Event,
-        shape_storage: *Storage(model.Shape),
+        shape_storage: *Storage(model.Project),
     ) !void {
         shape_storage.mutex.lock();
         defer shape_storage.mutex.unlock();

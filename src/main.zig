@@ -1,12 +1,18 @@
 const std = @import("std");
 
-const ArrayList = @import("collections").ArrayList;
-const editor = @import("editor");
-
 const db = @import("db.zig");
 const model = @import("model.zig");
+const event = @import("event.zig");
+const view_module = @import("view.zig");
+const BenchView = view_module.BenchView;
+const Input = view_module.Input;
+const Section = view_module.Section;
+const ProjectView = view_module.ProjectView;
+const TaskView = view_module.TaskView;
+const Views = view_module.Views;
+const Database = db.Database;
 
-const ShapeStorage = db.Storage(model.Shape);
+const ProjectStorage = db.Storage(model.Project);
 
 const TerminalSize = struct {
     cols: u16,
@@ -135,318 +141,131 @@ const Action = union(enum) {
     move_down,
     move_left,
     move_right,
+    insert_char: u21,
     select,
+    back,
+    add,
     quit,
+    escape,
+    backspace,
     none,
 };
 
 // =====
 // Update
 // =====
-
 fn update(
+    allocator: std.mem.Allocator,
     action: Action,
     views: *Views,
     should_quit: *bool,
-) void {
+    database: *Database,
+    project_storage: *ProjectStorage,
+) !void {
     if (action == .quit) {
         should_quit.* = true;
         return;
     }
 
-    switch (action) {
-        .move_up => {
-            switch (views.active_view) {
-                .pit => {
-                    if (views.active_view.pit.body.selected) |*s| {
-                        s.* = (s.* -% 1) % views.active_view.pit.body.len;
-                    }
-                },
-                .shape => {},
-                .task => {},
+    switch (views.active_view) {
+        .bench => |p| {
+            if (p.footer.input) |*in| {
+                switch (action) {
+                    .select => {
+                        // encode u21 buf back to utf8 for storage
+                        var name_buf: [1024]u8 = undefined;
+                        var name_len: usize = 0;
+                        var utf8_buf: [4]u8 = undefined;
+                        for (in.buf[0..in.len]) |cp| {
+                            const n = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+                            @memcpy(name_buf[name_len..][0..n], utf8_buf[0..n]);
+                            name_len += n;
+                        }
+                        const evt = event.Event{
+                            .timestamp = std.time.timestamp(),
+                            .data = .{
+                                .project_created = .{
+                                    .name = name_buf[0..name_len],
+                                    .id = std.crypto.random.int(u64),
+                                },
+                            },
+                        };
+
+                        try database.appendEvent(allocator, allocator, evt, project_storage);
+                        p.refreshBody(project_storage);
+                        p.footer.input = null;
+                    },
+                    .escape => {
+                        p.footer.input = null;
+                    },
+                    .insert_char => |c| {
+                        if (in.len < in.buf.len) {
+                            in.buf[in.len] = c;
+                            in.len += 1;
+                        }
+                    },
+                    .backspace => {
+                        if (in.len > 0) {
+                            in.len -= 1;
+                        }
+                    },
+                    else => {},
+                }
+            } else {
+                switch (action) {
+                    .move_up => {
+                        if (p.body.selected) |*se| {
+                            se.* = (se.* -% 1) % p.body.len;
+                        }
+                    },
+                    .move_down => {
+                        if (p.body.selected) |*se| {
+                            se.* = (se.* +% 1) % p.body.len;
+                        }
+                    },
+                    .select => {
+                        views.active_view = .{ .project = views.project };
+                    },
+                    .add => {
+                        p.footer.input = Input{
+                            .prompt = "Add project: ",
+                        };
+                    },
+                    else => {},
+                }
             }
         },
-        .move_down => {
-            switch (views.active_view) {
-                .pit => {
-                    if (views.active_view.pit.body.selected) |*s| {
-                        s.* = (s.* +% 1) % views.active_view.pit.body.len;
-                    }
-                },
-                .shape => {},
-                .task => {},
-            }
+        .project => |s| switch (action) {
+            .move_up => {
+                if (s.body.selected) |*se| {
+                    se.* = (se.* -% 1) % s.body.len;
+                }
+            },
+            .move_down => {
+                if (s.body.selected) |*se| {
+                    se.* = (se.* -% 1) % s.body.len;
+                }
+            },
+            .select => {
+                views.active_view = .{ .task = views.task };
+            },
+            .back => {
+                views.active_view = .{ .bench = views.bench };
+            },
+            else => {},
         },
-        .move_left => {},
-        .move_right => {},
-        .select => {
-            switch (views.active_view) {
-                .pit => {
-                    views.active_view = .{ .shape = views.shape };
-                },
-                .shape => {
-                    views.active_view = .{ .task = views.task };
-                },
-                .task => {},
-            }
+        .task => switch (action) {
+            .back => {
+                views.active_view = .{ .project = views.project };
+            },
+            else => {},
         },
-        .none => {},
-        else => {},
     }
 }
 
 // =====
 // Render
 // =====
-
-const TextElement = struct {
-    x_pct: u8,
-    text: []const u8,
-    color: ?u8 = null,
-    selected_color: ?u8 = null,
-    bold: bool = false,
-    same_row: bool = false,
-};
-
-const Section = struct {
-    elements: [64]TextElement = undefined,
-    selected: ?usize = null,
-    len: usize = 0,
-    input: bool = false,
-
-    pub fn add(self: *Section, element: TextElement) void {
-        self.elements[self.len] = element;
-        self.len += 1;
-    }
-};
-
-const PitView = struct {
-    header: Section,
-    body: Section,
-    footer: Section,
-
-    pub fn init() PitView {
-        var header = Section{};
-        var body = Section{ .selected = 0 };
-        var footer = Section{};
-        const title = TextElement{
-            .bold = true,
-            .color = 32,
-            .text = "Pit",
-            .x_pct = 50,
-        };
-        const mock_elem = TextElement{
-            .bold = true,
-            .color = 32,
-            .selected_color = 31,
-            .text = " - Tui for shape up for a solo dev",
-            .x_pct = 2,
-        };
-        const mock_elem_2 = TextElement{
-            .bold = true,
-            .color = 32,
-            .selected_color = 31,
-            .text = " - Make a whole database",
-            .x_pct = 2,
-        };
-        const footer_quit = TextElement{
-            .bold = true,
-            .color = 37,
-            .text = "q) Quit",
-            .x_pct = 1,
-        };
-        const footer_title = TextElement{
-            .bold = true,
-            .color = 36,
-            .text = "Footer",
-            .x_pct = 50,
-            .same_row = true,
-        };
-
-        header.add(title);
-        footer.add(footer_quit);
-        footer.add(footer_title);
-        body.add(mock_elem);
-        body.add(mock_elem_2);
-
-        return PitView{
-            .header = header,
-            .body = body,
-            .footer = footer,
-        };
-    }
-
-    pub fn refreshBody(self: *PitView, shape_storage: *ShapeStorage) void {
-        self.body.len = 0;
-        var it = shape_storage.entities.iterator();
-        while (it.next()) |entry| {
-            self.body.add(.{
-                .bold = true,
-                .color = 32,
-                .selected_color = 31,
-                .text = entry.value_ptr.name,
-                .x_pct = 2,
-            });
-        }
-        self.body.selected = if (self.body.len > 0) 0 else null;
-    }
-};
-
-const ShapeView = struct {
-    header: Section,
-    body: Section,
-    footer: Section,
-
-    pub fn init() ShapeView {
-        var header = Section{};
-        var body = Section{ .selected = 0 };
-        var footer = Section{};
-
-        const title = TextElement{
-            .bold = true,
-            .color = 33,
-            .text = "Shape",
-            .x_pct = 50,
-        };
-
-        const mock_task_1 = TextElement{
-            .bold = true,
-            .color = 32,
-            .selected_color = 31,
-            .text = "[ ] init project with basic raw mode",
-            .x_pct = 2,
-        };
-        const mock_task_2 = TextElement{
-            .bold = true,
-            .color = 32,
-            .selected_color = 31,
-            .text = "[x] make it compile",
-            .x_pct = 2,
-        };
-
-        const footer_back = TextElement{
-            .bold = true,
-            .color = 37,
-            .text = "b) Back",
-            .x_pct = 1,
-        };
-        const footer_start = TextElement{
-            .bold = true,
-            .color = 37,
-            .text = "enter) Start task",
-            .x_pct = 25,
-            .same_row = true,
-        };
-        const footer_title = TextElement{
-            .bold = true,
-            .color = 36,
-            .text = "Tui for shape up for a solo dev",
-            .x_pct = 50,
-            .same_row = true,
-        };
-
-        header.add(title);
-        body.add(mock_task_1);
-        body.add(mock_task_2);
-        footer.add(footer_back);
-        footer.add(footer_start);
-        footer.add(footer_title);
-
-        return ShapeView{
-            .header = header,
-            .body = body,
-            .footer = footer,
-        };
-    }
-};
-
-const TaskView = struct {
-    header: Section,
-    body: Section,
-    footer: Section,
-
-    pub fn init() TaskView {
-        var header = Section{};
-        var body = Section{};
-        var footer = Section{};
-
-        const shape_title = TextElement{
-            .bold = true,
-            .color = 33,
-            .text = "Tui for shape up for a solo dev",
-            .x_pct = 50,
-        };
-        const task_title = TextElement{
-            .bold = true,
-            .color = 36,
-            .text = "init project with basic raw mode",
-            .x_pct = 50,
-        };
-
-        const countdown = TextElement{
-            .bold = true,
-            .color = 32,
-            .text = "25:00",
-            .x_pct = 50,
-        };
-
-        const footer_stop = TextElement{
-            .bold = true,
-            .color = 37,
-            .text = "s) Stop",
-            .x_pct = 1,
-        };
-        const footer_doc = TextElement{
-            .bold = true,
-            .color = 37,
-            .text = "d) View doc",
-            .x_pct = 20,
-            .same_row = true,
-        };
-        const footer_status = TextElement{
-            .bold = true,
-            .color = 32,
-            .text = "RUNNING",
-            .x_pct = 50,
-            .same_row = true,
-        };
-
-        header.add(shape_title);
-        header.add(task_title);
-        body.add(countdown);
-        footer.add(footer_stop);
-        footer.add(footer_doc);
-        footer.add(footer_status);
-
-        return TaskView{
-            .header = header,
-            .body = body,
-            .footer = footer,
-        };
-    }
-};
-
-const View = union(enum) {
-    pit: *PitView,
-    shape: *ShapeView,
-    task: *TaskView,
-};
-
-const Views = struct {
-    pit: *PitView,
-    shape: *ShapeView,
-    task: *TaskView,
-    active_view: View,
-
-    pub fn init(pit: *PitView, shape: *ShapeView, task: *TaskView) Views {
-        return .{
-            .pit = pit,
-            .shape = shape,
-            .task = task,
-            .active_view = .{ .pit = pit },
-        };
-    }
-};
 
 const Layout = struct {
     start_pct: u8,
@@ -493,6 +312,31 @@ const Layouts = struct {
     }
 };
 
+fn renderInput(
+    writer: *std.Io.Writer,
+    input: Input,
+    layout: *Layout,
+    term_size: TerminalSize,
+) !void {
+    const row = layout.next();
+    const col = @max(1, @as(u16, 2) * term_size.cols / 100);
+
+    try writer.print("\x1b[1m\x1b[36m\x1b[{d};{d}H{s}", .{ row, col, input.prompt });
+
+    var char_count: u16 = 0;
+    var utf8_buf: [4]u8 = undefined;
+    for (input.buf[0..input.len]) |cp| {
+        const n = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+        try writer.writeAll(utf8_buf[0..n]);
+        char_count += 1;
+    }
+
+    try writer.writeAll("\x1b[0m");
+
+    const cursor_col = col + @as(u16, @intCast(input.prompt.len)) + char_count;
+    try writer.print("\x1b[{d};{d}H\x1b[7m \x1b[0m", .{ row, cursor_col });
+}
+
 fn renderSection(
     writer: *std.Io.Writer,
     section: Section,
@@ -527,12 +371,16 @@ fn render(
     try writer.writeAll("\x1b[H\x1b[2J");
 
     switch (views.active_view) {
-        .pit => |v| {
+        .bench => |v| {
             try renderSection(writer, v.header, &layouts.header, term_size);
             try renderSection(writer, v.body, &layouts.body, term_size);
-            try renderSection(writer, v.footer, &layouts.footer, term_size);
+            if (v.footer.input) |i| {
+                try renderInput(writer, i, &layouts.footer, term_size);
+            } else {
+                try renderSection(writer, v.footer, &layouts.footer, term_size);
+            }
         },
-        .shape => |v| {
+        .project => |v| {
             try renderSection(writer, v.header, &layouts.header, term_size);
             try renderSection(writer, v.body, &layouts.body, term_size);
             try renderSection(writer, v.footer, &layouts.footer, term_size);
@@ -548,35 +396,55 @@ fn render(
 }
 
 fn keyToAction(key: Key, views: *Views) Action {
-    if (key == .char and key.char == 'q') {
-        return .quit;
-    }
     return switch (views.active_view) {
-        .pit => switch (key) {
-            .char => |c| switch (c) {
+        .bench => |p| {
+            if (p.footer.input != null) {
+                return switch (key) {
+                    .char => |c| .{ .insert_char = c },
+                    .backspace => .backspace,
+                    .enter => .select,
+                    .escape => .escape,
+                    .none => .none,
+                    else => .none,
+                };
+            }
+            return switch (key) {
+                .char => |c| switch (c) {
+                    'q' => .quit,
+                    'a' => .add,
+                    else => .none,
+                },
+                .ctrl => .none,
+                .arrow_up => .move_up,
+                .arrow_down => .move_down,
+                .arrow_left => .move_left,
+                .arrow_right => .move_right,
+                .enter => .select,
+                .none => .none,
                 else => .none,
-            },
-            .ctrl => |c| switch (c) {
-                else => .none,
-            },
-            .arrow_up => .move_up,
-            .arrow_down => .move_down,
-            .arrow_left => .move_left,
-            .arrow_right => .move_right,
-            .enter => .select,
-            .none => .none,
-            else => .none,
+            };
         },
-        .shape => switch (key) {
+        .project => switch (key) {
+            .char => |c| switch (c) {
+                'q' => .quit,
+                'a' => .add,
+                'b' => .back,
+                else => .none,
+            },
             .arrow_up => .move_up,
             .arrow_down => .move_down,
             .arrow_left => .move_left,
             .arrow_right => .move_right,
             .enter => .select,
+            .escape => .escape,
             .none => .none,
             else => .none,
         },
         .task => switch (key) {
+            .char => |c| switch (c) {
+                'q' => .quit,
+                else => .none,
+            },
             .enter => .select,
             .none => .none,
             else => .none,
@@ -596,7 +464,7 @@ pub fn main() u8 {
     run(&stdout_writer.interface, &stderr_writer.interface) catch |err| {
         switch (err) {
             else => {
-                stderr_writer.interface.print("Error: {}", .{err}) catch return 1;
+                stderr_writer.interface.print("Error: {}\n", .{err}) catch return 1;
                 stderr_writer.interface.flush() catch return 1;
                 return 1;
             },
@@ -610,33 +478,33 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
 
     const main_allocator = std.heap.c_allocator;
 
-    var shape_storage = ShapeStorage.init(main_allocator);
+    var project_storage = ProjectStorage.init(main_allocator);
 
     var database = try db.Database.init("db.wal");
     defer database.deinit();
 
     var startup_arena = std.heap.ArenaAllocator.init(main_allocator);
 
-    try database.loadAllEvents(main_allocator, startup_arena.allocator(), &shape_storage);
+    try database.loadAllEvents(main_allocator, startup_arena.allocator(), &project_storage);
     startup_arena.deinit();
 
     // seed if empty
-    if (shape_storage.entities.count() == 0) {
+    if (project_storage.entities.count() == 0) {
         try database.appendEvent(main_allocator, main_allocator, .{
             .timestamp = std.time.timestamp(),
-            .data = .{ .shape_created = .{
+            .data = .{ .project_created = .{
                 .id = std.crypto.random.int(u64),
-                .name = " - Tui for shape up for a solo dev",
+                .name = " - Tui for project management for a solo dev",
             } },
-        }, &shape_storage);
+        }, &project_storage);
 
         try database.appendEvent(main_allocator, main_allocator, .{
             .timestamp = std.time.timestamp(),
-            .data = .{ .shape_created = .{
+            .data = .{ .project_created = .{
                 .id = std.crypto.random.int(u64),
                 .name = " - Make a whole database",
             } },
-        }, &shape_storage);
+        }, &project_storage);
     }
 
     const stdin = std.fs.File.stdin();
@@ -680,11 +548,12 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     defer stdout_writer.writeAll("\x1b[?25h") catch {};
     defer stdout_writer.writeAll("\x1b[?1049l") catch {};
 
-    var pit = PitView.init();
-    var shape = ShapeView.init();
-    var task = TaskView.init();
+    var bench_view = BenchView.init();
+    var project_view = ProjectView.init();
+    var task_view = TaskView.init();
 
-    var views = Views.init(&pit, &shape, &task);
+    var views = Views.init(&bench_view, &project_view, &task_view);
+    bench_view.refreshBody(&project_storage);
 
     var term_size = getTerminalSize(stdin.handle);
 
@@ -718,15 +587,15 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
         if (fds[0].revents & std.posix.POLL.IN != 0) {
             const key = try readKey(&stdin_reader.interface);
             const action = keyToAction(key, &views);
-            update(action, &views, &should_quit);
+            try update(main_allocator, action, &views, &should_quit, &database, &project_storage);
             needs_render = true;
         }
 
         if (needs_render) {
             layouts.reset(term_size.rows);
             switch (views.active_view) {
-                .pit => {},
-                .shape => {},
+                .bench => {},
+                .project => {},
                 .task => {},
             }
             try render(stdout_writer, &views, term_size, &layouts);

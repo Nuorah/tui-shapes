@@ -1,11 +1,12 @@
 const std = @import("std");
-const editor = @import("editor");
-const ArrayList = @import("collections").ArrayList;
 
-const EditorContext = struct {
-    file_path: []const u8,
-    term_size: TerminalSize,
-};
+const ArrayList = @import("collections").ArrayList;
+const editor = @import("editor");
+
+const db = @import("db.zig");
+const model = @import("model.zig");
+
+const ShapeStorage = db.Storage(model.Shape);
 
 const TerminalSize = struct {
     cols: u16,
@@ -154,8 +155,28 @@ fn update(
     }
 
     switch (action) {
-        .move_up => {},
-        .move_down => {},
+        .move_up => {
+            switch (views.active_view) {
+                .pit => {
+                    if (views.active_view.pit.body.selected) |*s| {
+                        s.* = (s.* -% 1) % views.active_view.pit.body.len;
+                    }
+                },
+                .shape => {},
+                .task => {},
+            }
+        },
+        .move_down => {
+            switch (views.active_view) {
+                .pit => {
+                    if (views.active_view.pit.body.selected) |*s| {
+                        s.* = (s.* +% 1) % views.active_view.pit.body.len;
+                    }
+                },
+                .shape => {},
+                .task => {},
+            }
+        },
         .move_left => {},
         .move_right => {},
         .select => {
@@ -191,6 +212,7 @@ const Section = struct {
     elements: [64]TextElement = undefined,
     selected: ?usize = null,
     len: usize = 0,
+    input: bool = false,
 
     pub fn add(self: *Section, element: TextElement) void {
         self.elements[self.len] = element;
@@ -252,6 +274,21 @@ const PitView = struct {
             .body = body,
             .footer = footer,
         };
+    }
+
+    pub fn refreshBody(self: *PitView, shape_storage: *ShapeStorage) void {
+        self.body.len = 0;
+        var it = shape_storage.entities.iterator();
+        while (it.next()) |entry| {
+            self.body.add(.{
+                .bold = true,
+                .color = 32,
+                .selected_color = 31,
+                .text = entry.value_ptr.name,
+                .x_pct = 2,
+            });
+        }
+        self.body.selected = if (self.body.len > 0) 0 else null;
     }
 };
 
@@ -571,6 +608,37 @@ pub fn main() u8 {
 pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     _ = stderr_writer;
 
+    const main_allocator = std.heap.c_allocator;
+
+    var shape_storage = ShapeStorage.init(main_allocator);
+
+    var database = try db.Database.init("db.wal");
+    defer database.deinit();
+
+    var startup_arena = std.heap.ArenaAllocator.init(main_allocator);
+
+    try database.loadAllEvents(main_allocator, startup_arena.allocator(), &shape_storage);
+    startup_arena.deinit();
+
+    // seed if empty
+    if (shape_storage.entities.count() == 0) {
+        try database.appendEvent(main_allocator, main_allocator, .{
+            .timestamp = std.time.timestamp(),
+            .data = .{ .shape_created = .{
+                .id = std.crypto.random.int(u64),
+                .name = " - Tui for shape up for a solo dev",
+            } },
+        }, &shape_storage);
+
+        try database.appendEvent(main_allocator, main_allocator, .{
+            .timestamp = std.time.timestamp(),
+            .data = .{ .shape_created = .{
+                .id = std.crypto.random.int(u64),
+                .name = " - Make a whole database",
+            } },
+        }, &shape_storage);
+    }
+
     const stdin = std.fs.File.stdin();
     var stdin_reader_buffer: [128]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_reader_buffer);
@@ -656,6 +724,11 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
 
         if (needs_render) {
             layouts.reset(term_size.rows);
+            switch (views.active_view) {
+                .pit => {},
+                .shape => {},
+                .task => {},
+            }
             try render(stdout_writer, &views, term_size, &layouts);
         }
     }

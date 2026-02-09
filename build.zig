@@ -21,7 +21,13 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("collections", collection_mod);
 
+    const db_mod = b.addModule("db", .{
+        .root_source_file = b.path("vendor/event_wal//src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
+    exe.root_module.addImport("db", db_mod);
     b.installArtifact(exe);
 
     exe.linkLibC();

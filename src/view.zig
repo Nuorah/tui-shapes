@@ -1,7 +1,10 @@
+const std = @import("std");
+
 const db = @import("db.zig");
 const model = @import("model.zig");
 
 const ProjectStorage = db.Storage(model.Project);
+const TaskStorage = db.Storage(model.Task);
 
 const TextElement = struct {
     x_pct: u8,
@@ -13,7 +16,7 @@ const TextElement = struct {
 };
 
 pub const Section = struct {
-    elements: [64]TextElement = undefined,
+    elements: [128]TextElement = undefined,
     selected: ?usize = null,
     len: usize = 0,
     input: ?Input = null,
@@ -24,9 +27,9 @@ pub const Section = struct {
     }
 };
 
-pub const Input  = struct {
+pub const Input = struct {
     buf: [128]u21 = undefined,
-    len:usize = 0,
+    len: usize = 0,
     prompt: []const u8,
 };
 
@@ -79,19 +82,34 @@ pub const BenchView = struct {
         };
     }
 
-    pub fn refreshBody(self: *BenchView, project_storage: *ProjectStorage) void {
+    pub fn refreshBody(self: *BenchView, scratch: *std.heap.ArenaAllocator, project_storage: *ProjectStorage) void {
+        _ = scratch.reset(.retain_capacity);
+        const allocator = scratch.allocator();
         self.body.len = 0;
         var it = project_storage.entities.iterator();
         while (it.next()) |entry| {
+            const status_str: []const u8 = switch (entry.value_ptr.status) {
+                .draft => "[draft]      |",
+                .doing => "[doing]      |",
+                .abandonned => "[abandonned] |",
+                .completed => "[completed]  |",
+            };
+            const color: u8 = switch (entry.value_ptr.status) {
+                .draft => 37,
+                .doing => 33,
+                .abandonned => 90,
+                .completed => 32,
+            };
+            const text = std.fmt.allocPrint(allocator, "{s} {s}", .{ status_str, entry.value_ptr.name }) catch continue;
             self.body.add(.{
                 .bold = true,
-                .color = 32,
+                .color = color,
                 .selected_color = 31,
-                .text = entry.value_ptr.name,
+                .text = text,
                 .x_pct = 2,
             });
+            self.body.selected = if (self.body.len > 0) 0 else null;
         }
-        self.body.selected = if (self.body.len > 0) 0 else null;
     }
 };
 
@@ -99,10 +117,11 @@ pub const ProjectView = struct {
     header: Section,
     body: Section,
     footer: Section,
+    current_project_id: u64 = 0,
 
     pub fn init() ProjectView {
         var header = Section{};
-        var body = Section{ .selected = 0 };
+        const body = Section{ .selected = 0 };
         var footer = Section{};
 
         const title = TextElement{
@@ -112,48 +131,55 @@ pub const ProjectView = struct {
             .x_pct = 50,
         };
 
-        const mock_task_1 = TextElement{
+        const status = TextElement{
             .bold = true,
-            .color = 32,
-            .selected_color = 31,
-            .text = "[ ] init project with basic raw mode",
-            .x_pct = 2,
-        };
-        const mock_task_2 = TextElement{
-            .bold = true,
-            .color = 32,
-            .selected_color = 31,
-            .text = "[x] make it compile",
-            .x_pct = 2,
+            .color = 90,
+            .text = "",
+            .x_pct = 50,
         };
 
-        const footer_back = TextElement{
+        const footer_add = TextElement{
             .bold = true,
             .color = 37,
-            .text = "b) Back",
+            .text = "a) Add",
             .x_pct = 1,
         };
         const footer_start = TextElement{
             .bold = true,
             .color = 37,
             .text = "enter) Start task",
-            .x_pct = 25,
+            .x_pct = 21,
             .same_row = true,
         };
-        const footer_title = TextElement{
+        const footer_back = TextElement{
             .bold = true,
-            .color = 36,
-            .text = "Footer",
-            .x_pct = 50,
+            .color = 37,
+            .text = "b) Back",
+            .x_pct = 41,
+            .same_row = true,
+        };
+        const footer_toggle = TextElement{
+            .bold = true,
+            .color = 37,
+            .text = "x) Toggle done",
+            .x_pct = 61,
+            .same_row = true,
+        };
+        const footer_status = TextElement{
+            .bold = true,
+            .color = 37,
+            .text = "s) Status",
+            .x_pct = 81,
             .same_row = true,
         };
 
         header.add(title);
-        body.add(mock_task_1);
-        body.add(mock_task_2);
+        header.add(status);
+        footer.add(footer_add);
         footer.add(footer_back);
         footer.add(footer_start);
-        footer.add(footer_title);
+        footer.add(footer_toggle);
+        footer.add(footer_status);
 
         return ProjectView{
             .header = header,
@@ -161,12 +187,59 @@ pub const ProjectView = struct {
             .footer = footer,
         };
     }
+
+    pub fn refreshHeader(self: *ProjectView, project_storage: *ProjectStorage) void {
+        if (project_storage.entities.get(self.current_project_id)) |project| {
+            self.header.elements[0].text = project.name;
+            const status_text: []const u8 = switch (project.status) {
+                .draft => "[draft]",
+                .doing => "[doing]",
+                .abandonned => "[abandonned]",
+                .completed => "[completed]",
+            };
+            const status_color: u8 = switch (project.status) {
+                .draft => 37,
+                .doing => 33,
+                .abandonned => 90,
+                .completed => 32,
+            };
+            self.header.elements[1].text = status_text;
+            self.header.elements[1].color = status_color;
+        }
+    }
+
+    pub fn refreshBody(
+        self: *ProjectView,
+        scratch: *std.heap.ArenaAllocator,
+        task_storage: *TaskStorage,
+        project_id: u64,
+    ) void {
+        _ = scratch.reset(.retain_capacity);
+        const allocator = scratch.allocator();
+        self.body.len = 0;
+        var it = task_storage.entities.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.project_id == project_id) {
+                const prefix: []const u8 = if (entry.value_ptr.done) "[x] " else "[ ] ";
+                const text = std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, entry.value_ptr.name }) catch continue;
+                self.body.add(.{
+                    .bold = true,
+                    .color = if (entry.value_ptr.done) 90 else 32,
+                    .selected_color = 31,
+                    .text = text,
+                    .x_pct = 2,
+                });
+            }
+        }
+        self.body.selected = if (self.body.len > 0) 0 else null;
+    }
 };
 
 pub const TaskView = struct {
     header: Section,
     body: Section,
     footer: Section,
+    current_task_id: u64 = 0,
 
     pub fn init() TaskView {
         var header = Section{};
@@ -176,13 +249,13 @@ pub const TaskView = struct {
         const project_title = TextElement{
             .bold = true,
             .color = 33,
-            .text = "A task",
+            .text = "",
             .x_pct = 50,
         };
         const task_title = TextElement{
             .bold = true,
             .color = 36,
-            .text = "init project with basic raw mode",
+            .text = "",
             .x_pct = 50,
         };
 
@@ -199,33 +272,31 @@ pub const TaskView = struct {
             .text = "s) Stop",
             .x_pct = 1,
         };
-        const footer_doc = TextElement{
-            .bold = true,
-            .color = 37,
-            .text = "d) View doc",
-            .x_pct = 20,
-            .same_row = true,
-        };
-        const footer_status = TextElement{
-            .bold = true,
-            .color = 32,
-            .text = "RUNNING",
-            .x_pct = 50,
-            .same_row = true,
-        };
 
         header.add(project_title);
         header.add(task_title);
         body.add(countdown);
         footer.add(footer_stop);
-        footer.add(footer_doc);
-        footer.add(footer_status);
 
         return TaskView{
             .header = header,
             .body = body,
             .footer = footer,
         };
+    }
+
+    pub fn refreshHeader(
+        self: *TaskView,
+        project_storage: *ProjectStorage,
+        task_storage: *TaskStorage,
+        project_id: u64,
+    ) void {
+        if (project_storage.entities.get(project_id)) |project| {
+            self.header.elements[0].text = project.name;
+        }
+        if (task_storage.entities.get(self.current_task_id)) |task| {
+            self.header.elements[1].text = task.name;
+        }
     }
 };
 
@@ -240,13 +311,19 @@ pub const Views = struct {
     project: *ProjectView,
     task: *TaskView,
     active_view: View,
+    scratch: std.heap.ArenaAllocator,
 
-    pub fn init(bench: *BenchView, project: *ProjectView, task: *TaskView) Views {
+    pub fn init(backing: std.mem.Allocator, bench: *BenchView, project: *ProjectView, task: *TaskView) Views {
         return .{
             .bench = bench,
             .project = project,
             .task = task,
             .active_view = .{ .bench = bench },
+            .scratch = std.heap.ArenaAllocator.init(backing),
         };
+    }
+
+    pub fn deinit(self: *Views) void {
+        self.scratch.deinit();
     }
 };

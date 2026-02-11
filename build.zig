@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("collections", collection_mod);
 
     const db_mod = b.addModule("db", .{
-        .root_source_file = b.path("vendor/event_wal//src/root.zig"),
+        .root_source_file = b.path("vendor/event_wal/src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -51,4 +51,18 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+
+    const db_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/db_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{},
+        }),
+    });
+    db_tests.root_module.addImport("db", db_mod);
+    db_tests.root_module.addImport("collections", collection_mod);
+
+    const run_db_tests = b.addRunArtifact(db_tests);
+    test_step.dependOn(&run_db_tests.step);
 }

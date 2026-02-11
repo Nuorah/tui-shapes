@@ -13,6 +13,7 @@ const Views = view_module.Views;
 const Database = db.Database;
 
 const ProjectStorage = db.Storage(model.Project);
+const TaskStorage = db.Storage(model.Task);
 
 const TerminalSize = struct {
     cols: u16,
@@ -148,6 +149,8 @@ const Action = union(enum) {
     quit,
     escape,
     backspace,
+    toggle_done,
+    cycle_status,
     none,
 };
 
@@ -161,6 +164,7 @@ fn update(
     should_quit: *bool,
     database: *Database,
     project_storage: *ProjectStorage,
+    task_storage: *TaskStorage,
 ) !void {
     if (action == .quit) {
         should_quit.* = true;
@@ -172,6 +176,10 @@ fn update(
             if (p.footer.input) |*in| {
                 switch (action) {
                     .select => {
+                        if (in.len == 0) {
+                            p.footer.input = null;
+                            return;
+                        }
                         // encode u21 buf back to utf8 for storage
                         var name_buf: [1024]u8 = undefined;
                         var name_len: usize = 0;
@@ -191,8 +199,8 @@ fn update(
                             },
                         };
 
-                        try database.appendEvent(allocator, allocator, evt, project_storage);
-                        p.refreshBody(project_storage);
+                        try database.appendEvent(allocator, allocator, evt, project_storage, task_storage);
+                        p.refreshBody(&views.scratch, project_storage);
                         p.footer.input = null;
                     },
                     .escape => {
@@ -224,38 +232,201 @@ fn update(
                         }
                     },
                     .select => {
-                        views.active_view = .{ .project = views.project };
+                        if (p.body.selected) |sel| {
+                            // need project id from storage — iterate to find nth entry
+                            var it = project_storage.entities.iterator();
+                            var idx: usize = 0;
+                            while (it.next()) |entry| {
+                                if (idx == sel) {
+                                    views.project.current_project_id = entry.key_ptr.*;
+                                    views.project.header.elements[0].text = entry.value_ptr.name;
+                                    break;
+                                }
+                                idx += 1;
+                            }
+                            views.project.refreshHeader(project_storage);
+                            views.project.refreshBody(&views.scratch, task_storage, views.project.current_project_id);
+                            views.active_view = .{ .project = views.project };
+                        }
                     },
                     .add => {
                         p.footer.input = Input{
                             .prompt = "Add project: ",
                         };
                     },
+                    .cycle_status => {
+                        if (p.body.selected) |sel| {
+                            var it = project_storage.entities.iterator();
+                            var idx: usize = 0;
+                            while (it.next()) |entry| {
+                                if (idx == sel) {
+                                    const id = entry.key_ptr.*;
+                                    const current = entry.value_ptr.status;
+                                    const status_fields: u8 = @intCast(@typeInfo(model.ProjectStatus).@"enum".fields.len);
+                                    const next_status: model.ProjectStatus = @enumFromInt(
+                                        (@as(u8, @intFromEnum(current)) +% 1) % status_fields,
+                                    );
+                                    const evt = event.Event{
+                                        .timestamp = std.time.timestamp(),
+                                        .data = .{
+                                            .project_set_status = .{
+                                                .id = id,
+                                                .status = next_status,
+                                            },
+                                        },
+                                    };
+                                    try database.appendEvent(allocator, allocator, evt, project_storage, task_storage);
+                                    p.refreshBody(&views.scratch, project_storage);
+                                    p.body.selected = sel;
+                                    break;
+                                }
+                                idx += 1;
+                            }
+                        }
+                    },
                     else => {},
                 }
             }
         },
-        .project => |s| switch (action) {
-            .move_up => {
-                if (s.body.selected) |*se| {
-                    se.* = (se.* -% 1) % s.body.len;
+        .project => |p| {
+            if (p.footer.input) |*in| {
+                switch (action) {
+                    .select => {
+                        if (in.len == 0) {
+                            p.footer.input = null;
+                            return;
+                        }
+                        // encode u21 buf back to utf8 for storage
+                        var name_buf: [1024]u8 = undefined;
+                        var name_len: usize = 0;
+                        var utf8_buf: [4]u8 = undefined;
+                        for (in.buf[0..in.len]) |cp| {
+                            const n = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+                            @memcpy(name_buf[name_len..][0..n], utf8_buf[0..n]);
+                            name_len += n;
+                        }
+                        const evt = event.Event{
+                            .timestamp = std.time.timestamp(),
+                            .data = .{
+                                .task_created = .{
+                                    .name = name_buf[0..name_len],
+                                    .id = std.crypto.random.int(u64),
+                                    .project_id = p.current_project_id,
+                                },
+                            },
+                        };
+
+                        try database.appendEvent(allocator, allocator, evt, project_storage, task_storage);
+                        p.refreshBody(&views.scratch, task_storage, p.current_project_id);
+                        p.footer.input = null;
+                    },
+                    .escape => {
+                        p.footer.input = null;
+                    },
+                    .insert_char => |c| {
+                        if (in.len < in.buf.len) {
+                            in.buf[in.len] = c;
+                            in.len += 1;
+                        }
+                    },
+                    .backspace => {
+                        if (in.len > 0) {
+                            in.len -= 1;
+                        }
+                    },
+                    else => {},
                 }
-            },
-            .move_down => {
-                if (s.body.selected) |*se| {
-                    se.* = (se.* -% 1) % s.body.len;
+            } else {
+                switch (action) {
+                    .move_up => {
+                        if (p.body.selected) |*se| {
+                            se.* = (se.* -% 1) % p.body.len;
+                        }
+                    },
+                    .move_down => {
+                        if (p.body.selected) |*se| {
+                            se.* = (se.* +% 1) % p.body.len;
+                        }
+                    },
+                    .select => {
+                        if (p.body.selected) |sel| {
+                            var it = task_storage.entities.iterator();
+                            var idx: usize = 0;
+                            while (it.next()) |entry| {
+                                if (entry.value_ptr.project_id == p.current_project_id) {
+                                    if (idx == sel) {
+                                        views.task.current_task_id = entry.key_ptr.*;
+                                        break;
+                                    }
+                                    idx += 1;
+                                }
+                            }
+                            views.task.refreshHeader(project_storage, task_storage, p.current_project_id);
+                            views.active_view = .{ .task = views.task };
+                        }
+                    },
+                    .back => {
+                        views.bench.refreshBody(&views.scratch, project_storage);
+                        views.active_view = .{ .bench = views.bench };
+                    },
+                    .add => {
+                        p.footer.input = Input{
+                            .prompt = "Add Task: ",
+                        };
+                    },
+                    .toggle_done => {
+                        if (p.body.selected) |sel| {
+                            var it = task_storage.entities.iterator();
+                            var idx: usize = 0;
+                            while (it.next()) |entry| {
+                                if (entry.value_ptr.project_id == p.current_project_id) {
+                                    if (idx == sel) {
+                                        const evt = event.Event{
+                                            .timestamp = std.time.timestamp(),
+                                            .data = .{
+                                                .task_set_done = .{
+                                                    .id = entry.key_ptr.*,
+                                                    .done = !entry.value_ptr.done,
+                                                },
+                                            },
+                                        };
+                                        try database.appendEvent(allocator, allocator, evt, project_storage, task_storage);
+                                        p.refreshBody(&views.scratch, task_storage, p.current_project_id);
+                                        p.body.selected = sel;
+                                        break;
+                                    }
+                                    idx += 1;
+                                }
+                            }
+                        }
+                    },
+                    .cycle_status => {
+                        const id = p.current_project_id;
+                        const project = project_storage.entities.get(id) orelse return;
+                        const status_fields: u8 = @intCast(@typeInfo(model.ProjectStatus).@"enum".fields.len);
+                        const next_status: model.ProjectStatus = @enumFromInt(
+                            (@as(u8, @intFromEnum(project.status)) +% 1) % status_fields,
+                        );
+                        const evt = event.Event{
+                            .timestamp = std.time.timestamp(),
+                            .data = .{
+                                .project_set_status = .{
+                                    .id = id,
+                                    .status = next_status,
+                                },
+                            },
+                        };
+                        try database.appendEvent(allocator, allocator, evt, project_storage, task_storage);
+                        p.refreshHeader(project_storage);
+                    },
+                    else => {},
                 }
-            },
-            .select => {
-                views.active_view = .{ .task = views.task };
-            },
-            .back => {
-                views.active_view = .{ .bench = views.bench };
-            },
-            else => {},
+            }
         },
         .task => switch (action) {
             .back => {
+                views.project.refreshBody(&views.scratch, task_storage, views.project.current_project_id);
+                views.project.refreshHeader(project_storage);
                 views.active_view = .{ .project = views.project };
             },
             else => {},
@@ -383,7 +554,11 @@ fn render(
         .project => |v| {
             try renderSection(writer, v.header, &layouts.header, term_size);
             try renderSection(writer, v.body, &layouts.body, term_size);
-            try renderSection(writer, v.footer, &layouts.footer, term_size);
+            if (v.footer.input) |i| {
+                try renderInput(writer, i, &layouts.footer, term_size);
+            } else {
+                try renderSection(writer, v.footer, &layouts.footer, term_size);
+            }
         },
         .task => |v| {
             try renderSection(writer, v.header, &layouts.header, term_size);
@@ -412,6 +587,7 @@ fn keyToAction(key: Key, views: *Views) Action {
                 .char => |c| switch (c) {
                     'q' => .quit,
                     'a' => .add,
+                    's' => .cycle_status,
                     else => .none,
                 },
                 .ctrl => .none,
@@ -424,25 +600,41 @@ fn keyToAction(key: Key, views: *Views) Action {
                 else => .none,
             };
         },
-        .project => switch (key) {
-            .char => |c| switch (c) {
-                'q' => .quit,
-                'a' => .add,
-                'b' => .back,
-                else => .none,
-            },
-            .arrow_up => .move_up,
-            .arrow_down => .move_down,
-            .arrow_left => .move_left,
-            .arrow_right => .move_right,
-            .enter => .select,
-            .escape => .escape,
-            .none => .none,
-            else => .none,
+        .project => |p| {
+            if (p.footer.input != null) {
+                return switch (key) {
+                    .char => |c| .{ .insert_char = c },
+                    .backspace => .backspace,
+                    .enter => .select,
+                    .escape => .escape,
+                    .none => .none,
+                    else => .none,
+                };
+            } else {
+                return switch (key) {
+                    .char => |c| switch (c) {
+                        'q' => .quit,
+                        'a' => .add,
+                        'b' => .back,
+                        's' => .cycle_status,
+                        'x' => .toggle_done,
+                        else => .none,
+                    },
+                    .arrow_up => .move_up,
+                    .arrow_down => .move_down,
+                    .arrow_left => .move_left,
+                    .arrow_right => .move_right,
+                    .enter => .select,
+                    .escape => .escape,
+                    .none => .none,
+                    else => .none,
+                };
+            }
         },
         .task => switch (key) {
             .char => |c| switch (c) {
                 'q' => .quit,
+                's' => .back,
                 else => .none,
             },
             .enter => .select,
@@ -479,33 +671,22 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     const main_allocator = std.heap.c_allocator;
 
     var project_storage = ProjectStorage.init(main_allocator);
+    var task_storage = TaskStorage.init(main_allocator);
 
-    var database = try db.Database.init("db.wal");
+    const home = std.posix.getenv("HOME") orelse return error.NoHome;
+    const wal_path = try std.fmt.allocPrint(main_allocator, "{s}/.local/share/bench/db.wal", .{home});
+
+    std.fs.makeDirAbsolute(std.fmt.allocPrint(main_allocator, "{s}/.local/share/bench", .{home}) catch unreachable) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+
+    var database = try db.Database.init(wal_path);
     defer database.deinit();
 
     var startup_arena = std.heap.ArenaAllocator.init(main_allocator);
 
-    try database.loadAllEvents(main_allocator, startup_arena.allocator(), &project_storage);
+    try database.loadAllEvents(main_allocator, startup_arena.allocator(), &project_storage, &task_storage);
     startup_arena.deinit();
-
-    // seed if empty
-    if (project_storage.entities.count() == 0) {
-        try database.appendEvent(main_allocator, main_allocator, .{
-            .timestamp = std.time.timestamp(),
-            .data = .{ .project_created = .{
-                .id = std.crypto.random.int(u64),
-                .name = " - Tui for project management for a solo dev",
-            } },
-        }, &project_storage);
-
-        try database.appendEvent(main_allocator, main_allocator, .{
-            .timestamp = std.time.timestamp(),
-            .data = .{ .project_created = .{
-                .id = std.crypto.random.int(u64),
-                .name = " - Make a whole database",
-            } },
-        }, &project_storage);
-    }
 
     const stdin = std.fs.File.stdin();
     var stdin_reader_buffer: [128]u8 = undefined;
@@ -552,8 +733,8 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     var project_view = ProjectView.init();
     var task_view = TaskView.init();
 
-    var views = Views.init(&bench_view, &project_view, &task_view);
-    bench_view.refreshBody(&project_storage);
+    var views = Views.init(main_allocator, &bench_view, &project_view, &task_view);
+    bench_view.refreshBody(&views.scratch, &project_storage);
 
     var term_size = getTerminalSize(stdin.handle);
 
@@ -587,7 +768,7 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
         if (fds[0].revents & std.posix.POLL.IN != 0) {
             const key = try readKey(&stdin_reader.interface);
             const action = keyToAction(key, &views);
-            try update(main_allocator, action, &views, &should_quit, &database, &project_storage);
+            try update(main_allocator, action, &views, &should_quit, &database, &project_storage, &task_storage);
             needs_render = true;
         }
 

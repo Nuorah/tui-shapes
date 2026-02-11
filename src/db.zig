@@ -15,6 +15,9 @@ pub fn Storage(comptime T: type) type {
 
 const Wal = db.Wal(event.Event);
 
+const ProjectStorage = Storage(model.Project);
+const TaskStorage = Storage(model.Task);
+
 pub const Database = struct {
     const Self = @This();
 
@@ -34,16 +37,35 @@ pub const Database = struct {
     pub fn loadEvent(
         allocator: std.mem.Allocator,
         event_to_load: event.Event,
-        shape_storage: *Storage(model.Project),
+        project_storage: *ProjectStorage,
+        task_storage: *TaskStorage,
     ) !void {
         switch (event_to_load.data) {
             .project_created => |payload| {
-                const shape = model.Project{
+                const project = model.Project{
                     .id = payload.id,
                     .name = try allocator.dupe(u8, payload.name),
                 };
 
-                try shape_storage.entities.put(shape.id, shape);
+                try project_storage.entities.put(project.id, project);
+            },
+            .project_set_status => |payload| {
+                const project_to_update = project_storage.entities.getPtr(payload.id) orelse return error.ProjectNotFound;
+                project_to_update.status = payload.status;
+            },
+            .task_created => |payload| {
+                const task = model.Task{
+                    .id = payload.id,
+                    .name = try allocator.dupe(u8, payload.name),
+                    .done = false,
+                    .project_id = payload.project_id,
+                };
+
+                try task_storage.entities.put(task.id, task);
+            },
+            .task_set_done => |payload| {
+                const task_to_update = task_storage.entities.getPtr(payload.id) orelse return error.TaskNotFound;
+                task_to_update.done = payload.done;
             },
         }
     }
@@ -52,12 +74,13 @@ pub const Database = struct {
         self: *Self,
         allocator: std.mem.Allocator,
         arena_allocator: std.mem.Allocator,
-        shape_storage: *Storage(model.Project),
+        project_storage: *ProjectStorage,
+        task_storage: *TaskStorage,
     ) !void {
         const events = try self.wal.readAll(arena_allocator);
 
         for (events.items) |event_to_load| {
-            try loadEvent(allocator, event_to_load, shape_storage);
+            try loadEvent(allocator, event_to_load, project_storage, task_storage);
         }
     }
 
@@ -66,13 +89,16 @@ pub const Database = struct {
         main_allocator: std.mem.Allocator,
         arena_allocator: std.mem.Allocator,
         event_to_append: event.Event,
-        shape_storage: *Storage(model.Project),
+        project_storage: *ProjectStorage,
+        task_storage: *TaskStorage,
     ) !void {
-        shape_storage.mutex.lock();
-        defer shape_storage.mutex.unlock();
+        project_storage.mutex.lock();
+        defer project_storage.mutex.unlock();
+        task_storage.mutex.lock();
+        defer task_storage.mutex.unlock();
 
         try self.wal.append(arena_allocator, event_to_append);
 
-        try loadEvent(main_allocator, event_to_append, shape_storage);
+        try loadEvent(main_allocator, event_to_append, project_storage, task_storage);
     }
 };

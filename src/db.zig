@@ -13,7 +13,7 @@ pub fn Storage(comptime T: type) type {
     return db.Storage(u64, T);
 }
 
-const Wal = db.Wal(event.Event);
+const Wal = db.Wal(event.EventData, 1);
 
 const ProjectStorage = Storage(model.Project);
 const TaskStorage = Storage(model.Task);
@@ -23,9 +23,9 @@ pub const Database = struct {
 
     wal: Wal,
 
-    pub fn init(wal_path: []const u8) !Database {
+    pub fn init(arena: std.mem.Allocator, wal_path: []const u8) !Database {
         return .{
-            .wal = try Wal.init(wal_path),
+            .wal = try Wal.init(wal_path, arena),
         };
     }
 
@@ -77,7 +77,8 @@ pub const Database = struct {
         project_storage: *ProjectStorage,
         task_storage: *TaskStorage,
     ) !void {
-        const events = try self.wal.readAll(arena_allocator);
+        const events = try self.wal.readAllBinary(arena_allocator);
+        std.debug.print("COUCOU", .{});
 
         for (events.items) |event_to_load| {
             try loadEvent(allocator, event_to_load, project_storage, task_storage);
@@ -97,7 +98,7 @@ pub const Database = struct {
         task_storage.mutex.lock();
         defer task_storage.mutex.unlock();
 
-        try self.wal.append(arena_allocator, event_to_append);
+        try self.wal.appendBinary(arena_allocator, event_to_append.data);
 
         try loadEvent(main_allocator, event_to_append, project_storage, task_storage);
     }

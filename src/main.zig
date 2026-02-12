@@ -680,7 +680,9 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
         if (err != error.PathAlreadyExists) return err;
     };
 
-    var database = try db.Database.init(wal_path);
+    var init_scratch = std.heap.ArenaAllocator.init(main_allocator);
+    var database = try db.Database.init(init_scratch.allocator(), wal_path);
+    init_scratch.deinit();
     defer database.deinit();
 
     var startup_arena = std.heap.ArenaAllocator.init(main_allocator);

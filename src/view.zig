@@ -1,10 +1,11 @@
 const std = @import("std");
 
-const db = @import("db.zig");
 const model = @import("model.zig");
+const event = @import("event.zig");
 
-const ProjectStorage = db.Storage(model.Project);
-const TaskStorage = db.Storage(model.Task);
+const ProjectStorage = event.ProjectStorage;
+const TaskStorage = event.TaskStorage;
+const Storages = event.Storages;
 
 const TextElement = struct {
     x_pct: u8,
@@ -287,14 +288,13 @@ pub const TaskView = struct {
 
     pub fn refreshHeader(
         self: *TaskView,
-        project_storage: *ProjectStorage,
-        task_storage: *TaskStorage,
+        storages:Storages,
         project_id: u64,
     ) void {
-        if (project_storage.entities.get(project_id)) |project| {
+        if (storages.projects.entities.get(project_id)) |project| {
             self.header.elements[0].text = project.name;
         }
-        if (task_storage.entities.get(self.current_task_id)) |task| {
+        if (storages.tasks.entities.get(self.current_task_id)) |task| {
             self.header.elements[1].text = task.name;
         }
     }

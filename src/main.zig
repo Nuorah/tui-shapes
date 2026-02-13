@@ -28,7 +28,6 @@ fn getTerminalSize(fd: std.posix.fd_t) TerminalSize {
             .rows = wsz.row,
         };
     }
-    // fallback
     return .{ .cols = 80, .rows = 24 };
 }
 
@@ -108,29 +107,25 @@ fn readKey(reader: anytype) !Key {
     if (c == '\t') return .tab;
     if (c == 127) return .backspace;
     if (c < 32) return .{ .ctrl = c + 'a' - 1 };
-    // at the end of readKey, instead of just returning .{ .char = c }
     if (c < 0x80) {
         return .{ .char = c };
     } else if (c & 0xE0 == 0xC0) {
-        // 2-byte sequence
         const c2 = reader.takeByte() catch return .none;
         const codepoint = (@as(u21, c & 0x1F) << 6) | (c2 & 0x3F);
         return .{ .char = codepoint };
     } else if (c & 0xF0 == 0xE0) {
-        // 3-byte sequence
         const c2 = reader.takeByte() catch return .none;
         const c3 = reader.takeByte() catch return .none;
         const codepoint = (@as(u21, c & 0x0F) << 12) | (@as(u21, c2 & 0x3F) << 6) | (c3 & 0x3F);
         return .{ .char = codepoint };
     } else if (c & 0xF8 == 0xF0) {
-        // 4-byte sequence
         const c2 = reader.takeByte() catch return .none;
         const c3 = reader.takeByte() catch return .none;
         const c4 = reader.takeByte() catch return .none;
         const codepoint = (@as(u21, c & 0x07) << 18) | (@as(u21, c2 & 0x3F) << 12) | (@as(u21, c3 & 0x3F) << 6) | (c4 & 0x3F);
         return .{ .char = codepoint };
     }
-    return .none; // invalid utf-8 lead byte
+    return .none;
 }
 
 // =====
@@ -178,7 +173,6 @@ fn update(
                             p.footer.input = null;
                             return;
                         }
-                        // encode u21 buf back to utf8 for storage
                         var name_buf: [1024]u8 = undefined;
                         var name_len: usize = 0;
                         var utf8_buf: [4]u8 = undefined;
@@ -188,10 +182,10 @@ fn update(
                             name_len += n;
                         }
                         const evt = event.EventData{
-                                .project_created = .{
-                                    .name = name_buf[0..name_len],
-                                    .id = std.crypto.random.int(u64),
-                                },
+                            .project_created = .{
+                                .name = name_buf[0..name_len],
+                                .id = std.crypto.random.int(u64),
+                            },
                         };
 
                         try database.appendEvent(allocator, allocator, evt, storages);
@@ -228,19 +222,12 @@ fn update(
                     },
                     .select => {
                         if (p.body.selected) |sel| {
-                            // need project id from storage — iterate to find nth entry
-                            var it = storages.projects.entities.iterator();
-                            var idx: usize = 0;
-                            while (it.next()) |entry| {
-                                if (idx == sel) {
-                                    views.project.current_project_id = entry.key_ptr.*;
-                                    views.project.header.elements[0].text = entry.value_ptr.name;
-                                    break;
-                                }
-                                idx += 1;
-                            }
+                            const id = p.ids[sel];
+                            const project = storages.projects.get(id) orelse return;
+                            views.project.current_project_id = id;
+                            views.project.header.elements[0].text = project.name;
                             views.project.refreshHeader(storages.projects);
-                            views.project.refreshBody(&views.scratch, storages.tasks, views.project.current_project_id);
+                            views.project.refreshBody(&views.scratch, storages.tasks, id);
                             views.active_view = .{ .project = views.project };
                         }
                     },
@@ -251,29 +238,21 @@ fn update(
                     },
                     .cycle_status => {
                         if (p.body.selected) |sel| {
-                            var it = storages.projects.entities.iterator();
-                            var idx: usize = 0;
-                            while (it.next()) |entry| {
-                                if (idx == sel) {
-                                    const id = entry.key_ptr.*;
-                                    const current = entry.value_ptr.status;
-                                    const status_fields: u8 = @intCast(@typeInfo(model.ProjectStatus).@"enum".fields.len);
-                                    const next_status: model.ProjectStatus = @enumFromInt(
-                                        (@as(u8, @intFromEnum(current)) +% 1) % status_fields,
-                                    );
-                                    const evt = event.EventData{
-                                            .project_set_status = .{
-                                                .id = id,
-                                                .status = next_status,
-                                            },
-                                    };
-                                    try database.appendEvent(allocator, allocator, evt, storages);
-                                    p.refreshBody(&views.scratch, storages.projects);
-                                    p.body.selected = sel;
-                                    break;
-                                }
-                                idx += 1;
-                            }
+                            const id = p.ids[sel];
+                            const project = storages.projects.get(id) orelse return;
+                            const status_fields: u8 = @intCast(@typeInfo(model.ProjectStatus).@"enum".fields.len);
+                            const next_status: model.ProjectStatus = @enumFromInt(
+                                (@as(u8, @intFromEnum(project.status)) +% 1) % status_fields,
+                            );
+                            const evt = event.EventData{
+                                .project_set_status = .{
+                                    .id = id,
+                                    .status = next_status,
+                                },
+                            };
+                            try database.appendEvent(allocator, allocator, evt, storages);
+                            p.refreshBody(&views.scratch, storages.projects);
+                            p.body.selected = sel;
                         }
                     },
                     else => {},
@@ -288,7 +267,6 @@ fn update(
                             p.footer.input = null;
                             return;
                         }
-                        // encode u21 buf back to utf8 for storage
                         var name_buf: [1024]u8 = undefined;
                         var name_len: usize = 0;
                         var utf8_buf: [4]u8 = undefined;
@@ -298,11 +276,11 @@ fn update(
                             name_len += n;
                         }
                         const evt = event.EventData{
-                                .task_created = .{
-                                    .name = name_buf[0..name_len],
-                                    .id = std.crypto.random.int(u64),
-                                    .project_id = p.current_project_id,
-                                },
+                            .task_created = .{
+                                .name = name_buf[0..name_len],
+                                .id = std.crypto.random.int(u64),
+                                .project_id = p.current_project_id,
+                            },
                         };
 
                         try database.appendEvent(allocator, allocator, evt, storages);
@@ -339,17 +317,8 @@ fn update(
                     },
                     .select => {
                         if (p.body.selected) |sel| {
-                            var it = storages.tasks.entities.iterator();
-                            var idx: usize = 0;
-                            while (it.next()) |entry| {
-                                if (entry.value_ptr.project_id == p.current_project_id) {
-                                    if (idx == sel) {
-                                        views.task.current_task_id = entry.key_ptr.*;
-                                        break;
-                                    }
-                                    idx += 1;
-                                }
-                            }
+                            const id = p.ids[sel];
+                            views.task.current_task_id = id;
                             views.task.refreshHeader(storages, p.current_project_id);
                             views.active_view = .{ .task = views.task };
                         }
@@ -365,39 +334,31 @@ fn update(
                     },
                     .toggle_done => {
                         if (p.body.selected) |sel| {
-                            var it = storages.tasks.entities.iterator();
-                            var idx: usize = 0;
-                            while (it.next()) |entry| {
-                                if (entry.value_ptr.project_id == p.current_project_id) {
-                                    if (idx == sel) {
-                                        const evt = event.EventData{
-                                                .task_set_done = .{
-                                                    .id = entry.key_ptr.*,
-                                                    .done = !entry.value_ptr.done,
-                                                },
-                                        };
-                                        try database.appendEvent(allocator, allocator, evt, storages);
-                                        p.refreshBody(&views.scratch, storages.tasks, p.current_project_id);
-                                        p.body.selected = sel;
-                                        break;
-                                    }
-                                    idx += 1;
-                                }
-                            }
+                            const id = p.ids[sel];
+                            const task = storages.tasks.get(id) orelse return;
+                            const evt = event.EventData{
+                                .task_set_done = .{
+                                    .id = id,
+                                    .done = !task.done,
+                                },
+                            };
+                            try database.appendEvent(allocator, allocator, evt, storages);
+                            p.refreshBody(&views.scratch, storages.tasks, p.current_project_id);
+                            p.body.selected = sel;
                         }
                     },
                     .cycle_status => {
                         const id = p.current_project_id;
-                        const project = storages.projects.entities.get(id) orelse return;
+                        const project = storages.projects.get(id) orelse return;
                         const status_fields: u8 = @intCast(@typeInfo(model.ProjectStatus).@"enum".fields.len);
                         const next_status: model.ProjectStatus = @enumFromInt(
                             (@as(u8, @intFromEnum(project.status)) +% 1) % status_fields,
                         );
                         const evt = event.EventData{
-                                .project_set_status = .{
-                                    .id = id,
-                                    .status = next_status,
-                                },
+                            .project_set_status = .{
+                                .id = id,
+                                .status = next_status,
+                            },
                         };
                         try database.appendEvent(allocator, allocator, evt, storages);
                         p.refreshHeader(storages.projects);
@@ -648,7 +609,6 @@ pub fn main() u8 {
     return 0;
 }
 
-
 pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     _ = stderr_writer;
 
@@ -698,12 +658,10 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     raw.cc[@intFromEnum(std.posix.V.TIME)] = 1;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, raw);
 
-    // block SIGWINCH so it goes to signalfd instead of interrupting us
     var mask = std.os.linux.sigemptyset();
     std.os.linux.sigaddset(&mask, std.posix.SIG.WINCH);
     _ = std.os.linux.sigprocmask(std.os.linux.SIG.BLOCK, &mask, null);
 
-    // create an fd that becomes readable when SIGWINCH fires
     const sig_fd = std.os.linux.signalfd(-1, &mask, 0);
     defer std.posix.close(@intCast(sig_fd));
 
@@ -721,14 +679,13 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
     var task_view = TaskView.init();
 
     var views = Views.init(main_allocator, &bench_view, &project_view, &task_view);
-    bench_view.refreshBody(&views.scratch, &project_storage);
+    bench_view.refreshBody(&views.scratch, storages.projects);
 
     var term_size = getTerminalSize(stdin.handle);
 
     var layouts = Layouts.init();
     layouts.reset(term_size.rows);
 
-    // initial render
     try render(stdout_writer, &views, term_size, &layouts);
 
     while (!should_quit) {
@@ -742,7 +699,6 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
 
         var needs_render = false;
 
-        // terminal resized
         if (fds[1].revents & std.posix.POLL.IN != 0) {
             var buf: [@sizeOf(std.os.linux.signalfd_siginfo)]u8 = undefined;
             _ = std.posix.read(@intCast(sig_fd), &buf) catch {};
@@ -751,7 +707,6 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
             needs_render = true;
         }
 
-        // keyboard input
         if (fds[0].revents & std.posix.POLL.IN != 0) {
             const key = try readKey(&stdin_reader.interface);
             const action = keyToAction(key, &views);
@@ -761,11 +716,6 @@ pub fn run(stdout_writer: *std.Io.Writer, stderr_writer: *std.Io.Writer) !void {
 
         if (needs_render) {
             layouts.reset(term_size.rows);
-            switch (views.active_view) {
-                .bench => {},
-                .project => {},
-                .task => {},
-            }
             try render(stdout_writer, &views, term_size, &layouts);
         }
     }

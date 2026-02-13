@@ -38,6 +38,8 @@ pub const BenchView = struct {
     header: Section,
     body: Section,
     footer: Section,
+    ids: [128]u64 = undefined,
+    ids_len: usize = 0,
 
     pub fn init() BenchView {
         var header = Section{};
@@ -87,8 +89,11 @@ pub const BenchView = struct {
         _ = scratch.reset(.retain_capacity);
         const allocator = scratch.allocator();
         self.body.len = 0;
+        self.ids_len = 0;
         var it = project_storage.entities.iterator();
         while (it.next()) |entry| {
+            self.ids[self.ids_len] = entry.key_ptr.*;
+            self.ids_len += 1;
             const status_str: []const u8 = switch (entry.value_ptr.status) {
                 .draft => "[draft]      |",
                 .doing => "[doing]      |",
@@ -119,6 +124,8 @@ pub const ProjectView = struct {
     body: Section,
     footer: Section,
     current_project_id: u64 = 0,
+    ids: [128]u64 = undefined,
+    ids_len: usize = 0,
 
     pub fn init() ProjectView {
         var header = Section{};
@@ -190,7 +197,7 @@ pub const ProjectView = struct {
     }
 
     pub fn refreshHeader(self: *ProjectView, project_storage: *ProjectStorage) void {
-        if (project_storage.entities.get(self.current_project_id)) |project| {
+        if (project_storage.get(self.current_project_id)) |project| {
             self.header.elements[0].text = project.name;
             const status_text: []const u8 = switch (project.status) {
                 .draft => "[draft]",
@@ -218,9 +225,12 @@ pub const ProjectView = struct {
         _ = scratch.reset(.retain_capacity);
         const allocator = scratch.allocator();
         self.body.len = 0;
+        self.ids_len = 0;
         var it = task_storage.entities.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.project_id == project_id) {
+                self.ids[self.ids_len] = entry.key_ptr.*;
+                self.ids_len += 1;
                 const prefix: []const u8 = if (entry.value_ptr.done) "[x] " else "[ ] ";
                 const text = std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, entry.value_ptr.name }) catch continue;
                 self.body.add(.{
@@ -288,13 +298,13 @@ pub const TaskView = struct {
 
     pub fn refreshHeader(
         self: *TaskView,
-        storages:Storages,
+        storages: Storages,
         project_id: u64,
     ) void {
-        if (storages.projects.entities.get(project_id)) |project| {
+        if (storages.projects.get(project_id)) |project| {
             self.header.elements[0].text = project.name;
         }
-        if (storages.tasks.entities.get(self.current_task_id)) |task| {
+        if (storages.tasks.get(self.current_task_id)) |task| {
             self.header.elements[1].text = task.name;
         }
     }
